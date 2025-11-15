@@ -8,20 +8,29 @@
 				</div>
 				<!-- right: controls -->
 				<div style="display:flex;align-items:center;gap:12px;">
+					<!-- time range selector: controls parsing cutoff -->
 					<v-select
-						v-model="selectedFile"
-						:items="files"
-						label="Select log file"
-						style="max-width:300px;"
+						v-model="timeRange"
+						:items="timeRangeOptions"
+						label="Range"
+						style="max-width:160px;"
 						dense
 						hide-details
 					/>
-					<v-btn color="success" @click="loadStats">
-						<v-icon left>mdi-play</v-icon>
-						Load Stats
-					</v-btn>
-				</div>
-			</div>
+ 					<v-select
+ 						v-model="selectedFile"
+ 						:items="files"
+ 						label="Log file"
+ 						style="max-width:300px;"
+ 						dense
+ 						hide-details
+ 					/>
+ 					<v-btn color="success" @click="loadStats">
+ 						<v-icon left>mdi-refresh</v-icon>
+ 						Load
+ 					</v-btn>
+ 				</div>
+ 			</div>
 		</v-card-title>
 		<!-- overlay bound to loading -->
 		<v-overlay :value="loading" absolute>
@@ -37,15 +46,15 @@
 						</div>
 					</td>
 					<td class="ps-value">{{ noOfFinishedPrints }}</td>
-					<td class="ps-label">Finished prints, in total</td>
+					<td class="ps-label">Finished prints</td>
 					<td class="ps-value">{{ noOfCancelledPrints }}</td>
 					<td class="ps-label">Cancelled prints</td>
 				</tr>
 				<tr>
-					<td class="ps-value">{{ finishedLastYear }}</td>
-					<td class="ps-label">Finished (last rolling year)</td>
+					<!--<td class="ps-value">{{ finishedLastYear }}</td>
+					<td class="ps-label">Finished (last rolling year)</td>-->
 					<td class="ps-value">{{ busiestWeekCount }} </td>
-					<td class="ps-label">Busiest week, ({{ busiestWeek }} )</td>
+					<td class="ps-label">Busiest point, ({{ busiestWeek }} )</td>
 				</tr>
 				<tr>
 					<td class="ps-value">{{ avgPrintTimeFormatted }}</td>
@@ -111,6 +120,11 @@ export default {
 			// Chart.js instance
 			chartInstance: null,
 			ratioChartInstance: null,
+			// time range selector for parsing
+			timeRange: 'Past month',
+			timeRangeOptions: ['All time', 'Past year', 'Past month', 'Past week'],
+			// parsed events cached in memory (lightweight objects), reused when timeRange changes
+			parsedEvents: [], // { date: Date, dateStr: 'YYYY-MM-DD', finished: bool, cancelled: bool, printMinutes: number|null }
 		}
 	},
 	methods: {
@@ -177,10 +191,10 @@ export default {
  						filename: this.combinePaths(this.systemDirectory, this.selectedFile),
  						type: 'text',
  						showProgress: true,
- 						showSuccess: true,
+ 						showSuccess: false,
  						showError: true,
  					});
-					this.showStats(stats);
++					this.showStats(stats);
  				} else {
  					this.errorMessage = null;
  				}
@@ -196,6 +210,8 @@ export default {
 			if (minutes <= 0) return '—';
 			const h = Math.floor(minutes / 60);
 			const m = Math.round(minutes % 60);
+			// omit hours if zero
+			if (h === 0) return `${m}m`;
 			return `${h}h ${m}m`;
 		},
 		// parse print time from finished line, e.g. "print time was 0h 48m"
@@ -208,126 +224,145 @@ export default {
 			}
 			return null;
 		},
+		// return a Date cutoff (UTC midnight) for the given range, or null for 'All time'
+		getCutoffDate(range) {
+			if (!range) return null;
+			const r = String(range).toLowerCase();
+			if (r === 'all time' || r === 'all') return null;
+			const now = new Date();
+			// use UTC midnight for comparisons
+			const cutoff = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+			if (r.includes('year')) {
+				cutoff.setUTCFullYear(cutoff.getUTCFullYear() - 1);
+				return cutoff;
+			}
+			if (r.includes('month')) {
+				cutoff.setUTCMonth(cutoff.getUTCMonth() - 1);
+				return cutoff;
+			}
+			if (r.includes('week')) {
+				cutoff.setUTCDate(cutoff.getUTCDate() - 7);
+				return cutoff;
+			}
+			return null;
+		},
+		// parse file contents into lightweight event objects and cache them
 		showStats(stats) {
-			// stats may be a string or an object depending on download implementation
 			const text = typeof stats === 'string'
 				? stats
 				: (stats && (stats.data || stats.text)) ? (stats.data || stats.text) : String(stats);
 
-			const lines = text.split(/\r?\n/);
-			// maps keyed by ISO week "YYYY-WW"
+			const lines = (text || '').split(/\r?\n/);
+			const tsRe = /^(\d{4}-\d{2}-\d{2})/;
+			const events = [];
+			for (const rawLine of lines) {
+				if (!rawLine) continue;
+				const line = rawLine.trim();
+				const m = tsRe.exec(line);
+				if (!m) continue;
+				const dateStr = m[1];
+				const lc = line.toLowerCase();
+				if (!lc.includes('[warn]')) continue;
+				const isFinished = lc.includes('finished');
+				const isCancelled = lc.includes('cancelled') || lc.includes('canceled');
+				if (!isFinished && !isCancelled) continue;
+				const d = new Date(dateStr + 'T00:00:00Z');
+				if (Number.isNaN(d.getTime())) continue;
+				const printMin = this.extractPrintTimeMinutes(line);
+				events.push({
+					date: d,
+					dateStr,
+					finished: !!isFinished,
+					cancelled: !!isCancelled,
+					printMinutes: printMin
+				});
+			}
+			// cache parsed events (lightweight) and process according to current timeRange
+			this.parsedEvents = events;
+			this.processEvents();
+		},
+
+		// process the cached parsedEvents according to current timeRange and grouping
+		processEvents() {
+			const cutoff = this.getCutoffDate(this.timeRange);
+			const rangeLower = (this.timeRange || '').toLowerCase();
+			const groupByDay = (rangeLower.includes('month') || rangeLower.includes('week'));
+
 			const finishedMap = Object.create(null);
 			const cancelledMap = Object.create(null);
-			const printTimePerWeekMap = Object.create(null);
+			const printTimePerPeriodMap = Object.create(null);
 			let totalFinished = 0;
 			let totalCancelled = 0;
-			// new: track print times and last-year finished
 			const printTimes = [];
 			let finishedLastYearCount = 0;
 			const now = new Date();
 			const oneYearAgo = new Date(now);
 			oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
 
-			const tsRe = /^(\d{4}-\d{2}-\d{2})/; // match lines starting with YYYY-MM-DD
-			for (const rawLine of lines) {
-				if (!rawLine) continue;
-				const line = rawLine.trim();
-				// only consider lines that start with a date timestamp
-				const m = tsRe.exec(line);
-				if (!m) continue;
-				const dateStr = m[1];
-				const lc = line.toLowerCase();
-				if (!lc.includes('[warn]')) continue; // per requirement use warn-level rows
-				const isFinished = lc.includes('finished');
-				const isCancelled = lc.includes('cancelled') || lc.includes('canceled');
-				if (!isFinished && !isCancelled) continue;
-				// parse date (YYYY-MM-DD) -> Date
-				const d = new Date(dateStr + 'T00:00:00Z');
-				if (Number.isNaN(d.getTime())) continue;
-				const key = this.isoWeekKeyFromDate(d);
-				if (isFinished) {
-					finishedMap[key] = (finishedMap[key] || 0) + 1;
+			for (const ev of this.parsedEvents || []) {
+				if (!ev || !ev.date) continue;
+				if (cutoff && ev.date < cutoff) continue;
+				const periodKey = groupByDay ? ev.dateStr : this.isoWeekKeyFromDate(ev.date);
+				if (ev.finished) {
+					finishedMap[periodKey] = (finishedMap[periodKey] || 0) + 1;
 					totalFinished++;
-					// track last-year finished
-					if (d >= oneYearAgo) finishedLastYearCount++;
-					// extract print time if available
-					const printMin = this.extractPrintTimeMinutes(line);
-					if (printMin !== null) {
-						printTimes.push(printMin);
-						// accumulate print time per week
-						printTimePerWeekMap[key] = (printTimePerWeekMap[key] || 0) + printMin;
+					if (ev.date >= oneYearAgo) finishedLastYearCount++;
+					if (ev.printMinutes != null) {
+						printTimes.push(ev.printMinutes);
+						printTimePerPeriodMap[periodKey] = (printTimePerPeriodMap[periodKey] || 0) + ev.printMinutes;
 					}
- 				}
- 				if (isCancelled) {
- 					cancelledMap[key] = (cancelledMap[key] || 0) + 1;
- 					totalCancelled++;
- 				}
- 			}
-
- 			// merge week keys and sort
- 			const keys = Array.from(new Set(Object.keys(finishedMap).concat(Object.keys(cancelledMap))));
- 			keys.sort(); // lexical sort YYYY-WW works
-
- 			this.weeklyLabels = keys.map(k => this.weekLabelFromKey(k));
- 			this.finishedPerWeek = keys.map(k => finishedMap[k] || 0);
- 			this.cancelledPerWeek = keys.map(k => cancelledMap[k] || 0);
- 			this.totalPrintTimePerWeek = keys.map(k => Math.round(printTimePerWeekMap[k] || 0) / 60); // convert to hours
- 			this.noOfFinishedPrints = totalFinished;
- 			this.noOfCancelledPrints = totalCancelled;
- 			this.finishedLastYear = finishedLastYearCount;
-
-			// find busiest week
-			let maxWeekCount = 0;
-			let busiestKey = '';
-			for (const key of keys) {
-				const count = (finishedMap[key] || 0) + (cancelledMap[key] || 0);
-				if (count > maxWeekCount) {
-					maxWeekCount = count;
-					busiestKey = key;
+				}
+				if (ev.cancelled) {
+					cancelledMap[periodKey] = (cancelledMap[periodKey] || 0) + 1;
+					totalCancelled++;
 				}
 			}
-			this.busiestWeek = busiestKey ? this.weekLabelFromKey(busiestKey) : '—';
-			this.busiestWeekCount = maxWeekCount;
 
-			// calculate print time stats
+			const keys = Array.from(new Set(Object.keys(finishedMap).concat(Object.keys(cancelledMap))));
+			keys.sort();
+
+			if (groupByDay) {
+				this.weeklyLabels = keys.slice();
+			} else {
+				this.weeklyLabels = keys.map(k => this.weekLabelFromKey(k));
+			}
+
+			this.finishedPerWeek = keys.map(k => finishedMap[k] || 0);
+			this.cancelledPerWeek = keys.map(k => cancelledMap[k] || 0);
+			this.totalPrintTimePerWeek = keys.map(k => (printTimePerPeriodMap[k] || 0) / 60);
+			this.noOfFinishedPrints = totalFinished;
+			this.noOfCancelledPrints = totalCancelled;
+			this.finishedLastYear = finishedLastYearCount;
+
+			let maxCount = 0, busiestKey = '';
+			for (const k of keys) {
+				const c = (finishedMap[k] || 0) + (cancelledMap[k] || 0);
+				if (c > maxCount) { maxCount = c; busiestKey = k; }
+			}
+			this.busiestWeekCount = maxCount;
+			this.busiestWeek = groupByDay ? (busiestKey || '—') : (busiestKey ? this.weekLabelFromKey(busiestKey) : '—');
+
 			if (printTimes.length > 0) {
 				this.longestPrintTimeMinutes = Math.max(...printTimes);
-				const avg = printTimes.reduce((a,b) => a+b, 0) / printTimes.length;
-				this.avgPrintTimeMinutes = avg;
+				this.avgPrintTimeMinutes = printTimes.reduce((a,b) => a+b, 0) / printTimes.length;
 			} else {
 				this.longestPrintTimeMinutes = 0;
 				this.avgPrintTimeMinutes = 0;
 			}
 
- 			// draw charts (Chart.js)
- 			this.$nextTick(() => {
-				this.renderRatioChart();
- 				this.renderChart();
- 			});
-
- 			// keep original event for any external listeners
- 			this.$emit('show-stats', {
- 				raw: text,
- 				noOfFinishedPrints: totalFinished,
- 				noOfCancelledPrints: totalCancelled,
- 				weekly: {
- 					labels: this.weeklyLabels,
- 					finished: this.finishedPerWeek,
- 					cancelled: this.cancelledPerWeek
- 				}
- 			});
- 		},
+			this.$nextTick(()=>{ this.renderRatioChart(); this.renderChart(); });
+			this.$emit('show-stats', { noOfFinishedPrints: totalFinished, noOfCancelledPrints: totalCancelled, weekly: { labels: this.weeklyLabels, finished: this.finishedPerWeek, cancelled: this.cancelledPerWeek }, groupBy: groupByDay ? 'day' : 'week' });
+		},
 		// render pie chart showing finished vs cancelled ratio
 		renderRatioChart() {
-			const canvas = this.$refs.ratioChart;
-			if (!canvas) return;
-			canvas.style.display = 'block';
-			canvas.style.width = '100%';
-			canvas.style.maxWidth = '100%';
-			canvas.style.boxSizing = 'border-box';
-			if (canvas.parentElement) canvas.parentElement.style.overflow = 'hidden';
-			const ctx = canvas.getContext('2d');
-
+		const canvas = this.$refs.ratioChart;
+		if (!canvas) return;
+		canvas.style.display = 'block';
+		canvas.style.width = '100%';
+		canvas.style.maxWidth = '100%';
+		canvas.style.boxSizing = 'border-box';
+		if (canvas.parentElement) canvas.parentElement.style.overflow = 'hidden';
+		const ctx = canvas.getContext('2d');
 			const data = {
 				labels: ['Finished', 'Cancelled'],
 				datasets: [{
@@ -371,11 +406,14 @@ export default {
  			if (canvas.parentElement) canvas.parentElement.style.overflow = 'hidden';
  			const ctx = canvas.getContext('2d');
 
+			// capture timeRange for use in callback (this context is lost in Chart.js callback)
+			const currentTimeRange = this.timeRange;
+
  			const data = {
  				labels: this.weeklyLabels,
  				datasets: [
  					{
- 						label: 'Finished per week',
+ 						label: 'Finished',
  						data: this.finishedPerWeek,
  						borderColor: '#2c7be5',
  						backgroundColor: 'rgba(44,123,229,0.08)',
@@ -383,7 +421,7 @@ export default {
  						lineTension: 0.1,
  					},
  					{
- 					 label: 'Cancelled per week',
+ 					 label: 'Cancelled',
  					 data: this.cancelledPerWeek,
  					 borderColor: '#e74c3c',
  					 backgroundColor: 'rgba(231,76,60,0.08)',
@@ -391,7 +429,7 @@ export default {
  					 lineTension: 0.1,
  					},
  					{
- 						label: 'Print time per week',
+ 						label: 'Print time',
  						data: this.totalPrintTimePerWeek,
  						borderColor: '#27ae60',
  						backgroundColor: 'rgba(39,174,96,0.08)',
@@ -444,14 +482,21 @@ export default {
  							maxRotation: 0,
  							minRotation: 0,
  							callback: function(value, index, labels) {
- 								// format "YYYY-MM-DD" as "YY-MM"
- 								if (value && value.length >= 5) {
- 									return value.slice(2, 7); // "YY-MM"
+ 								// format based on grouping: week => YY-MM, day => YY-MM-DD
+ 								if (!value) return value;
+								const rangeLower = (currentTimeRange || '').toLowerCase();
+ 								const groupByDay = (rangeLower.includes('month') || rangeLower.includes('week'));
+ 								if (groupByDay) {
+ 									// day format YYYY-MM-DD -> YY-MM-DD (last 8 chars)
+ 									if (value.length >= 8) return value.slice(2, 10); // "YY-MM-DD"
+ 								} else {
+ 									// week format: already YYYY-MM-DD (Monday) -> YY-MM
+ 									if (value.length >= 5) return value.slice(2, 7); // "YY-MM"
  								}
  								return value;
  							}
  						}
- 					}]
+ 					}],
  				}
  			};
 
@@ -472,6 +517,12 @@ export default {
  			}
  		}
  	},
+	watch: {
+		timeRange() {
+			// reprocess using cached parsedEvents only
+			if (this.parsedEvents && this.parsedEvents.length) this.processEvents();
+		}
+	},
  	mounted() {
  		this.fetchFileList();
  	},
