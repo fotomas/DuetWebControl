@@ -4,26 +4,20 @@
 			<v-btn  @click="loadStats">Load Stats</v-btn>
 			<!-- show parsed results -->
 			<tr>
-				<td>No. finished prints (warn)</td>
 				<td>{{ noOfFinishedPrints }}</td>
-			</tr>
-			<tr>
-				<td>No. cancelled prints (warn)</td>
+				<td>No. finished prints (warn)</td>
 				<td>{{ noOfCancelledPrints }}</td>
+				<td>No. cancelled prints (warn)</td>
 			</tr>
 			<tr>
 				<td>Finished (last rolling year)</td>
 				<td>{{ finishedLastYear }}</td>
-			</tr>
-			<tr>
 				<td>Busiest week</td>
 				<td>{{ busiestWeek }} ({{ busiestWeekCount }} total)</td>
 			</tr>
 			<tr>
 				<td>Average print time (finished)</td>
 				<td>{{ avgPrintTimeFormatted }}</td>
-			</tr>
-			<tr>
 				<td>Longest print time</td>
 				<td>{{ longestPrintTimeFormatted }}</td>
 			</tr>
@@ -82,6 +76,7 @@ export default {
 			weeklyLabels: [],
 			finishedPerWeek: [],
 			cancelledPerWeek: [],
+			totalPrintTimePerWeek: [],
 			// new stats
 			finishedLastYear: 0,
 			busiestWeek: '',
@@ -174,7 +169,7 @@ export default {
 			return null;
 		},
 		showStats(stats) {
-		// stats may be a string or an object depending on download implementation
+			// stats may be a string or an object depending on download implementation
 			const text = typeof stats === 'string'
 				? stats
 				: (stats && (stats.data || stats.text)) ? (stats.data || stats.text) : String(stats);
@@ -183,6 +178,7 @@ export default {
 			// maps keyed by ISO week "YYYY-WW"
 			const finishedMap = Object.create(null);
 			const cancelledMap = Object.create(null);
+			const printTimePerWeekMap = Object.create(null);
 			let totalFinished = 0;
 			let totalCancelled = 0;
 			// new: track print times and last-year finished
@@ -216,7 +212,11 @@ export default {
 					if (d >= oneYearAgo) finishedLastYearCount++;
 					// extract print time if available
 					const printMin = this.extractPrintTimeMinutes(line);
-					if (printMin !== null) printTimes.push(printMin);
+					if (printMin !== null) {
+						printTimes.push(printMin);
+						// accumulate print time per week
+						printTimePerWeekMap[key] = (printTimePerWeekMap[key] || 0) + printMin;
+					}
  				}
  				if (isCancelled) {
  					cancelledMap[key] = (cancelledMap[key] || 0) + 1;
@@ -231,6 +231,7 @@ export default {
  			this.weeklyLabels = keys.map(k => this.weekLabelFromKey(k));
  			this.finishedPerWeek = keys.map(k => finishedMap[k] || 0);
  			this.cancelledPerWeek = keys.map(k => cancelledMap[k] || 0);
+ 			this.totalPrintTimePerWeek = keys.map(k => Math.round(printTimePerWeekMap[k] || 0) / 60); // convert to hours
  			this.noOfFinishedPrints = totalFinished;
  			this.noOfCancelledPrints = totalCancelled;
  			this.finishedLastYear = finishedLastYearCount;
@@ -300,7 +301,8 @@ export default {
 			const options = {
 				responsive: true,
 				maintainAspectRatio: false,
-				legend: { display: true, position: 'bottom' }
+				legend: { display: true, position: 'bottom' },
+				cutoutPercentage: 50,
 			};
 
 			if (this.ratioChartInstance) {
@@ -341,12 +343,21 @@ export default {
  						lineTension: 0.1,
  					},
  					{
- 						label: 'Cancelled per week',
- 						data: this.cancelledPerWeek,
- 						borderColor: '#e74c3c',
- 						backgroundColor: 'rgba(231,76,60,0.08)',
+ 					 label: 'Cancelled per week',
+ 					 data: this.cancelledPerWeek,
+ 					 borderColor: '#e74c3c',
+ 					 backgroundColor: 'rgba(231,76,60,0.08)',
+ 					 fill: false,
+ 					 lineTension: 0.1,
+ 					},
+ 					{
+ 						label: 'Print time per week',
+ 						data: this.totalPrintTimePerWeek,
+ 						borderColor: '#27ae60',
+ 						backgroundColor: 'rgba(39,174,96,0.08)',
  						fill: false,
  						lineTension: 0.1,
+ 						yAxisID: 'y-axis-1'
  					}
  				]
  			};
@@ -355,12 +366,51 @@ export default {
  				responsive: true,
  				maintainAspectRatio: false,
  				legend: { display: true },
+				// custom tooltip formatting: show total print time as "Hh Mm"
+				tooltips: {
+					callbacks: {
+						label: function(tooltipItem, data) {
+							const ds = data.datasets[tooltipItem.datasetIndex] || {};
+							const label = ds.label || '';
+							// detect total print time dataset by label
+							if (/total print time/i.test(label)) {
+								// tooltipItem.yLabel is in hours (may be fractional) — convert to minutes
+								const minutes = Math.round((tooltipItem.yLabel || 0) * 60);
+								const h = Math.floor(minutes / 60);
+								const m = minutes % 60;
+								return label + ': ' + (h > 0 ? h + 'h ' : '') + m + 'm';
+							}
+							// default formatting for other datasets
+							return label + ': ' + tooltipItem.yLabel;
+						}
+					}
+				},
  				scales: {
- 					yAxes: [{
- 						ticks: { beginAtZero: true, precision: 0 }
- 					}],
+ 					yAxes: [
+ 						{
+ 							id: 'y-axis-0',
+ 							position: 'left',
+ 							ticks: { beginAtZero: true, precision: 0 }
+ 						},
+ 						{
+ 							id: 'y-axis-1',
+ 							position: 'right',
+ 							ticks: { beginAtZero: true }
+ 						}
+ 					],
  					xAxes: [{
- 						ticks: { autoSkip: true, maxRotation: 0, minRotation: 0 }
+ 						ticks: {
+ 							autoSkip: true,
+ 							maxRotation: 0,
+ 							minRotation: 0,
+ 							callback: function(value, index, labels) {
+ 								// format "YYYY-MM-DD" as "YY-MM"
+ 								if (value && value.length >= 5) {
+ 									return value.slice(2, 7); // "YY-MM"
+ 								}
+ 								return value;
+ 							}
+ 						}
  					}]
  				}
  			};
