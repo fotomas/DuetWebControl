@@ -11,22 +11,60 @@
 				<td>No. cancelled prints (warn)</td>
 				<td>{{ noOfCancelledPrints }}</td>
 			</tr>
-		</template>
-	</v-simple-table>
+			<tr>
+				<td>Finished (last rolling year)</td>
+				<td>{{ finishedLastYear }}</td>
+			</tr>
+			<tr>
+				<td>Busiest week</td>
+				<td>{{ busiestWeek }} ({{ busiestWeekCount }} total)</td>
+			</tr>
+			<tr>
+				<td>Average print time (finished)</td>
+				<td>{{ avgPrintTimeFormatted }}</td>
+			</tr>
+			<tr>
+				<td>Longest print time</td>
+				<td>{{ longestPrintTimeFormatted }}</td>
+			</tr>
+			<tr>
+				<td colspan="2">
+					<!-- Pie chart: finished vs cancelled ratio -->
+					<div style="width:100%;overflow:hidden;max-width:300px;">
+						<canvas ref="ratioChart" style="display:block;width:100%;height:200px;max-width:100%;box-sizing:border-box"></canvas>
+					</div>
+				</td>
+			</tr>
+ 			<tr>
+ 				<td colspan="2">
+ 					<!-- ensure the canvas never grows larger than its container -->
+ 					<div style="width:100%;overflow:hidden;">
+ 						<canvas ref="weekChart" style="display:block;width:100%;height:240px;max-width:100%;box-sizing:border-box"></canvas>
+ 					</div>
+ 				</td>
+ 			</tr>
+ 		</template>
+ 	</v-simple-table>
 </template>
 
 <script>
 'use strict'
 
 import { mapState, mapActions } from 'vuex';
+import Chart from 'chart.js';
 
 export default {
 	computed: {
 		// expose systemDirectory from the store if present
-		
 		...mapState('machine/model', {
 			systemDirectory: (state) => state.directories.system
 		}),
+		avgPrintTimeFormatted() {
+			return this.formatMinutesToHoursMinutes(this.avgPrintTimeMinutes);
+		},
+		longestPrintTimeFormatted() {
+			return this.formatMinutesToHoursMinutes(this.longestPrintTimeMinutes);
+		}
 	},
 	data(){
 		return{
@@ -40,6 +78,19 @@ export default {
 			// new counters
 			noOfFinishedPrints: 0,
 			noOfCancelledPrints: 0,
+			// per-week data for chart
+			weeklyLabels: [],
+			finishedPerWeek: [],
+			cancelledPerWeek: [],
+			// new stats
+			finishedLastYear: 0,
+			busiestWeek: '',
+			busiestWeekCount: 0,
+			avgPrintTimeMinutes: 0,
+			longestPrintTimeMinutes: 0,
+			// Chart.js instance
+			chartInstance: null,
+			ratioChartInstance: null,
 		}
 	},
 	methods: {
@@ -52,6 +103,28 @@ export default {
 			const sep = dir.endsWith('/') || dir.endsWith('\\') ? '' : '/'
 			return `${dir}${sep}${file}`
 		},
+		// ISO week number and week-key helpers
+		isoWeekKeyFromDate(d) {
+			// returns YYYY-WW
+			const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+			// Thursday in current week decides the year.
+			date.setUTCDate(date.getUTCDate() + 4 - (date.getUTCDay()||7));
+			const yearStart = new Date(Date.UTC(date.getUTCFullYear(),0,1));
+			const weekNo = Math.floor(( (date - yearStart) / 86400000 + 1)/7) + 1;
+			const ww = String(weekNo).padStart(2,'0');
+			return `${date.getUTCFullYear()}-${ww}`;
+		},
+		weekLabelFromKey(key) {
+			// convert "YYYY-WW" to an approximate week-start label: Monday of that ISO week
+			const [y, w] = key.split('-').map(Number);
+			// Calculate Monday of ISO week:
+			const simple = new Date(Date.UTC(y, 0, 1 + (w - 1) * 7));
+			// adjust to Monday
+			const day = simple.getUTCDay() || 7;
+			const monday = new Date(simple);
+			monday.setUTCDate(simple.getUTCDate() - (day - 1));
+			return monday.toISOString().slice(0,10);
+		},
  		async loadStats() {
  			if (this.loading) {
  				// Don't attempt to load more than one file at once...
@@ -61,7 +134,8 @@ export default {
  			this.ready = false;
  			this.loading = true;
  			try {
-				console.log(this.combinePaths(this.systemDirectory, this.selectedFile));
+				console.log(this.systemDirectory);
+ 				console.log(this.combinePaths(this.systemDirectory, this.selectedFile));
  
  				if (this.selectedFile) {
  					const stats = await this.download({
@@ -79,32 +153,244 @@ export default {
  				console.warn(e);
  				this.errorMessage = e.message;
  			}
- 			this.loading = false;
- 			this.ready = true;
- 		},
+			this.loading = false;
+			this.ready = true;
+		},
+		// helper to convert minutes to "Xh YYm" format
+		formatMinutesToHoursMinutes(minutes) {
+			if (minutes <= 0) return '—';
+			const h = Math.floor(minutes / 60);
+			const m = Math.round(minutes % 60);
+			return `${h}h ${m}m`;
+		},
+		// parse print time from finished line, e.g. "print time was 0h 48m"
+		extractPrintTimeMinutes(line) {
+			const match = line.match(/print time was (\d+)h\s*(\d+)m/i);
+			if (match) {
+				const h = parseInt(match[1], 10);
+				const m = parseInt(match[2], 10);
+				return h * 60 + m;
+			}
+			return null;
+		},
 		showStats(stats) {
-			// stats may be a string or an object depending on download implementation
+		// stats may be a string or an object depending on download implementation
 			const text = typeof stats === 'string'
 				? stats
 				: (stats && (stats.data || stats.text)) ? (stats.data || stats.text) : String(stats);
 
 			const lines = text.split(/\r?\n/);
-			let finished = 0;
-			let cancelled = 0;
-			for (const line of lines) {
-				if (!line) continue;
-				if (line.includes('[warn]')) {
-					const lc = line.toLowerCase();
-					if (lc.includes('finished')) finished++;
-					// handle both american and british spellings
-					if (lc.includes('cancelled') || lc.includes('canceled')) cancelled++;
+			// maps keyed by ISO week "YYYY-WW"
+			const finishedMap = Object.create(null);
+			const cancelledMap = Object.create(null);
+			let totalFinished = 0;
+			let totalCancelled = 0;
+			// new: track print times and last-year finished
+			const printTimes = [];
+			let finishedLastYearCount = 0;
+			const now = new Date();
+			const oneYearAgo = new Date(now);
+			oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+
+			const tsRe = /^(\d{4}-\d{2}-\d{2})/; // match lines starting with YYYY-MM-DD
+			for (const rawLine of lines) {
+				if (!rawLine) continue;
+				const line = rawLine.trim();
+				// only consider lines that start with a date timestamp
+				const m = tsRe.exec(line);
+				if (!m) continue;
+				const dateStr = m[1];
+				const lc = line.toLowerCase();
+				if (!lc.includes('[warn]')) continue; // per requirement use warn-level rows
+				const isFinished = lc.includes('finished');
+				const isCancelled = lc.includes('cancelled') || lc.includes('canceled');
+				if (!isFinished && !isCancelled) continue;
+				// parse date (YYYY-MM-DD) -> Date
+				const d = new Date(dateStr + 'T00:00:00Z');
+				if (Number.isNaN(d.getTime())) continue;
+				const key = this.isoWeekKeyFromDate(d);
+				if (isFinished) {
+					finishedMap[key] = (finishedMap[key] || 0) + 1;
+					totalFinished++;
+					// track last-year finished
+					if (d >= oneYearAgo) finishedLastYearCount++;
+					// extract print time if available
+					const printMin = this.extractPrintTimeMinutes(line);
+					if (printMin !== null) printTimes.push(printMin);
+ 				}
+ 				if (isCancelled) {
+ 					cancelledMap[key] = (cancelledMap[key] || 0) + 1;
+ 					totalCancelled++;
+ 				}
+ 			}
+
+ 			// merge week keys and sort
+ 			const keys = Array.from(new Set(Object.keys(finishedMap).concat(Object.keys(cancelledMap))));
+ 			keys.sort(); // lexical sort YYYY-WW works
+
+ 			this.weeklyLabels = keys.map(k => this.weekLabelFromKey(k));
+ 			this.finishedPerWeek = keys.map(k => finishedMap[k] || 0);
+ 			this.cancelledPerWeek = keys.map(k => cancelledMap[k] || 0);
+ 			this.noOfFinishedPrints = totalFinished;
+ 			this.noOfCancelledPrints = totalCancelled;
+ 			this.finishedLastYear = finishedLastYearCount;
+
+			// find busiest week
+			let maxWeekCount = 0;
+			let busiestKey = '';
+			for (const key of keys) {
+				const count = (finishedMap[key] || 0) + (cancelledMap[key] || 0);
+				if (count > maxWeekCount) {
+					maxWeekCount = count;
+					busiestKey = key;
 				}
 			}
-			this.noOfFinishedPrints = finished;
-			this.noOfCancelledPrints = cancelled;
-			// keep original event for any external listeners
-			this.$emit('show-stats', { raw: text, noOfFinishedPrints: finished, noOfCancelledPrints: cancelled });
+			this.busiestWeek = busiestKey ? this.weekLabelFromKey(busiestKey) : '—';
+			this.busiestWeekCount = maxWeekCount;
+
+			// calculate print time stats
+			if (printTimes.length > 0) {
+				this.longestPrintTimeMinutes = Math.max(...printTimes);
+				const avg = printTimes.reduce((a,b) => a+b, 0) / printTimes.length;
+				this.avgPrintTimeMinutes = avg;
+			} else {
+				this.longestPrintTimeMinutes = 0;
+				this.avgPrintTimeMinutes = 0;
+			}
+
+ 			// draw charts (Chart.js)
+ 			this.$nextTick(() => {
+				this.renderRatioChart();
+ 				this.renderChart();
+ 			});
+
+ 			// keep original event for any external listeners
+ 			this.$emit('show-stats', {
+ 				raw: text,
+ 				noOfFinishedPrints: totalFinished,
+ 				noOfCancelledPrints: totalCancelled,
+ 				weekly: {
+ 					labels: this.weeklyLabels,
+ 					finished: this.finishedPerWeek,
+ 					cancelled: this.cancelledPerWeek
+ 				}
+ 			});
+ 		},
+		// render pie chart showing finished vs cancelled ratio
+		renderRatioChart() {
+			const canvas = this.$refs.ratioChart;
+			if (!canvas) return;
+			canvas.style.display = 'block';
+			canvas.style.width = '100%';
+			canvas.style.maxWidth = '100%';
+			canvas.style.boxSizing = 'border-box';
+			if (canvas.parentElement) canvas.parentElement.style.overflow = 'hidden';
+			const ctx = canvas.getContext('2d');
+
+			const data = {
+				labels: ['Finished', 'Cancelled'],
+				datasets: [{
+					data: [this.noOfFinishedPrints, this.noOfCancelledPrints],
+					backgroundColor: ['#2c7be5', '#e74c3c'],
+					borderColor: ['#1e5ba8', '#c0392b'],
+					borderWidth: 1
+				}]
+			};
+
+			const options = {
+				responsive: true,
+				maintainAspectRatio: false,
+				legend: { display: true, position: 'bottom' }
+			};
+
+			if (this.ratioChartInstance) {
+				this.ratioChartInstance.data = data;
+				this.ratioChartInstance.options = options;
+				this.ratioChartInstance.update();
+				if (typeof this.ratioChartInstance.resize === 'function') this.ratioChartInstance.resize();
+			} else {
+				this.ratioChartInstance = new Chart(ctx, {
+					type: 'doughnut',
+					data,
+					options
+				});
+				if (typeof this.ratioChartInstance.resize === 'function') this.ratioChartInstance.resize();
+			}
+		},
+ 		// render or update Chart.js line chart
+ 		renderChart() {
+ 			const canvas = this.$refs.weekChart;
+ 			if (!canvas) return;
+ 			// enforce CSS sizing so Chart.js measures correct clientWidth (prevents overflow / double-size)
+ 			canvas.style.display = 'block';
+ 			canvas.style.width = '100%';
+ 			canvas.style.maxWidth = '100%';
+ 			canvas.style.boxSizing = 'border-box';
+ 			if (canvas.parentElement) canvas.parentElement.style.overflow = 'hidden';
+ 			const ctx = canvas.getContext('2d');
+
+ 			const data = {
+ 				labels: this.weeklyLabels,
+ 				datasets: [
+ 					{
+ 						label: 'Finished per week',
+ 						data: this.finishedPerWeek,
+ 						borderColor: '#2c7be5',
+ 						backgroundColor: 'rgba(44,123,229,0.08)',
+ 						fill: false,
+ 						lineTension: 0.1,
+ 					},
+ 					{
+ 						label: 'Cancelled per week',
+ 						data: this.cancelledPerWeek,
+ 						borderColor: '#e74c3c',
+ 						backgroundColor: 'rgba(231,76,60,0.08)',
+ 						fill: false,
+ 						lineTension: 0.1,
+ 					}
+ 				]
+ 			};
+
+ 			const options = {
+ 				responsive: true,
+ 				maintainAspectRatio: false,
+ 				legend: { display: true },
+ 				scales: {
+ 					yAxes: [{
+ 						ticks: { beginAtZero: true, precision: 0 }
+ 					}],
+ 					xAxes: [{
+ 						ticks: { autoSkip: true, maxRotation: 0, minRotation: 0 }
+ 					}]
+ 				}
+ 			};
+
+ 			if (this.chartInstance) {
+ 				this.chartInstance.data = data;
+ 				this.chartInstance.options = options;
+ 				this.chartInstance.update();
+ 				// ensure Chart.js recomputes internal canvas size
+ 				if (typeof this.chartInstance.resize === 'function') this.chartInstance.resize();
+ 			} else {
+ 				this.chartInstance = new Chart(ctx, {
+ 					type: 'line',
+ 					data,
+ 					options
+ 				});
+ 				// initial resize to match container exactly
+ 				if (typeof this.chartInstance.resize === 'function') this.chartInstance.resize();
+ 			}
+ 		}
+ 	},
+ 	beforeDestroy() {
+ 		if (this.chartInstance) {
+ 			this.chartInstance.destroy();
+ 			this.chartInstance = null;
+ 		}
+		if (this.ratioChartInstance) {
+			this.ratioChartInstance.destroy();
+			this.ratioChartInstance = null;
 		}
- 	}
+ 	},
  }
 </script>
