@@ -57,8 +57,8 @@ export default initCollection(DwcPlugin, [
     },
 	{
         id: "PrintStats",
-        name: "This is a test",
-        author: "me",
+        name: "Print Stats",
+        author: "fotomas",
         version: "3.6.1",
         loadDwcResources: () => import(
             /* webpackChunkName: "PrintStats" */

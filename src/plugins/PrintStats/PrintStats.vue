@@ -51,10 +51,10 @@
 					<td class="ps-label">Cancelled prints</td>
 				</tr>
 				<tr>
-					<!--<td class="ps-value">{{ finishedLastYear }}</td>
-					<td class="ps-label">Finished (last rolling year)</td>-->
+					<td class="ps-value">{{ longestRunPeriodTimeFormatted }}</td>
+					<td class="ps-label">{{ longestRunLabel }} ({{ longestRunPeriodLabel }})</td>
 					<td class="ps-value">{{ busiestWeekCount }} </td>
-					<td class="ps-label">Busiest point, ({{ busiestWeek }} )</td>
+					<td class="ps-label">{{ busiestLabel }}, ({{ busiestWeek }})</td>
 				</tr>
 				<tr>
 					<td class="ps-value">{{ avgPrintTimeFormatted }}</td>
@@ -92,12 +92,27 @@ export default {
 		},
 		longestPrintTimeFormatted() {
 			return this.formatMinutesToHoursMinutes(this.longestPrintTimeMinutes);
+		},
+		longestRunPeriodTimeFormatted() {
+			return this.formatMinutesToHoursMinutes(this.longestRunPeriodMinutes);
+		},
+		// true when grouping is by day (Past month / Past week)
+		isGroupByDay() {
+			const r = (this.timeRange || '').toLowerCase();
+			return r.includes('month') || r.includes('week');
+		},
+		// dynamic labels depending on grouping
+		busiestLabel() {
+			return this.isGroupByDay ? 'Most prints in a day' : 'Most prints in a week';
+		},
+		longestRunLabel() {
+			return this.isGroupByDay ? 'Most print time in a day' : 'Most print time in a week';
 		}
 	},
 	data(){
 		return{
 			files: [],
-			selectedFile: '_eventlog.txt',
+			selectedFile: '',
 			loadingFiles: false,
 			isActive: true,
 			ready: false,
@@ -111,12 +126,12 @@ export default {
 			finishedPerWeek: [],
 			cancelledPerWeek: [],
 			totalPrintTimePerWeek: [],
-			// new stats
-			finishedLastYear: 0,
-			busiestWeek: '',
-			busiestWeekCount: 0,
-			avgPrintTimeMinutes: 0,
-			longestPrintTimeMinutes: 0,
+			longestRunPeriodLabel: '—',
+			longestRunPeriodMinutes: 0,
+ 			busiestWeek: '',
+ 			busiestWeekCount: 0,
+ 			avgPrintTimeMinutes: 0,
+ 			longestPrintTimeMinutes: 0,
 			// Chart.js instance
 			chartInstance: null,
 			ratioChartInstance: null,
@@ -162,14 +177,14 @@ export default {
 		async fetchFileList() {
 			this.loading = true;
 			try {
-				console.log("systemDirectory");
-				console.log(this.systemDirectory);
-
 				const files = await this.getFileList(this.systemDirectory);
 				this.files = files
 					.filter(file => !file.isDirectory && (file.name.endsWith('.txt') || file.name.endsWith('.log')))
 					.map(file => file.name)
 					.sort();
+				if (this.files.length > 0) {
+					this.selectedFile = this.files[0];
+				}
 			} finally {
 				this.loading = false;
 			}
@@ -183,9 +198,7 @@ export default {
  			this.ready = false;
  			this.loading = true;
  			try {
-				console.log(this.systemDirectory);
- 				console.log(this.combinePaths(this.systemDirectory, this.selectedFile));
- 
+
  				if (this.selectedFile) {
  					const stats = await this.download({
  						filename: this.combinePaths(this.systemDirectory, this.selectedFile),
@@ -253,20 +266,30 @@ export default {
 				: (stats && (stats.data || stats.text)) ? (stats.data || stats.text) : String(stats);
 
 			const lines = (text || '').split(/\r?\n/);
-			const tsRe = /^(\d{4}-\d{2}-\d{2})/;
+			// match an ISO date (YYYY-MM-DD) optionally followed by a time (HH:MM:SS)
+			// anywhere in the line. This handles both _eventlog (date at line start)
+			// and print_log (many "power up" blocks and lines without a date).
+			const tsRe = /(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}:\d{2}))?/;
 			const events = [];
+			let lastSeenDateStr = null;
 			for (const rawLine of lines) {
 				if (!rawLine) continue;
 				const line = rawLine.trim();
+				// explicitly ignore "power up" lines entirely
+				if (/^power up\b/i.test(line)) continue;
 				const m = tsRe.exec(line);
-				if (!m) continue;
-				const dateStr = m[1];
+				// if no date found in this line, try to reuse the last seen date
+				if (!m && !lastSeenDateStr) continue;
+				const dateStr = m ? m[1] : lastSeenDateStr;
+				const timeStr = (m && m[2]) ? m[2] : '00:00:00';
+				if (dateStr) lastSeenDateStr = dateStr;
 				const lc = line.toLowerCase();
 				if (!lc.includes('[warn]')) continue;
 				const isFinished = lc.includes('finished');
 				const isCancelled = lc.includes('cancelled') || lc.includes('canceled');
 				if (!isFinished && !isCancelled) continue;
-				const d = new Date(dateStr + 'T00:00:00Z');
+				// build full timestamp (UTC)
+				const d = new Date(dateStr + 'T' + timeStr + 'Z');
 				if (Number.isNaN(d.getTime())) continue;
 				const printMin = this.extractPrintTimeMinutes(line);
 				events.push({
@@ -294,29 +317,32 @@ export default {
 			let totalFinished = 0;
 			let totalCancelled = 0;
 			const printTimes = [];
-			let finishedLastYearCount = 0;
-			const now = new Date();
-			const oneYearAgo = new Date(now);
-			oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
-
-			for (const ev of this.parsedEvents || []) {
-				if (!ev || !ev.date) continue;
-				if (cutoff && ev.date < cutoff) continue;
-				const periodKey = groupByDay ? ev.dateStr : this.isoWeekKeyFromDate(ev.date);
-				if (ev.finished) {
-					finishedMap[periodKey] = (finishedMap[periodKey] || 0) + 1;
-					totalFinished++;
-					if (ev.date >= oneYearAgo) finishedLastYearCount++;
+ 			const now = new Date();
+ 			const oneYearAgo = new Date(now);
+ 			oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+ 
+ 			for (const ev of this.parsedEvents || []) {
+ 				if (!ev || !ev.date) continue;
+ 				if (cutoff && ev.date < cutoff) continue;
+ 				const periodKey = groupByDay ? ev.dateStr : this.isoWeekKeyFromDate(ev.date);
+ 				if (ev.finished) {
+ 					finishedMap[periodKey] = (finishedMap[periodKey] || 0) + 1;
+ 					totalFinished++;
+ 					if (ev.printMinutes != null) {
+ 						// include finished print times in per-period runtime totals
+ 						printTimes.push(ev.printMinutes);
+						printTimePerPeriodMap[periodKey] = (printTimePerPeriodMap[periodKey] || 0) + ev.printMinutes;
+ 					}
+ 				}
+ 				if (ev.cancelled) {
+ 					cancelledMap[periodKey] = (cancelledMap[periodKey] || 0) + 1;
+ 					totalCancelled++;
+					// include cancelled print times in per-period runtime totals as well
 					if (ev.printMinutes != null) {
-						printTimes.push(ev.printMinutes);
 						printTimePerPeriodMap[periodKey] = (printTimePerPeriodMap[periodKey] || 0) + ev.printMinutes;
 					}
-				}
-				if (ev.cancelled) {
-					cancelledMap[periodKey] = (cancelledMap[periodKey] || 0) + 1;
-					totalCancelled++;
-				}
-			}
+ 				}
+ 			}
 
 			const keys = Array.from(new Set(Object.keys(finishedMap).concat(Object.keys(cancelledMap))));
 			keys.sort();
@@ -332,15 +358,23 @@ export default {
 			this.totalPrintTimePerWeek = keys.map(k => (printTimePerPeriodMap[k] || 0) / 60);
 			this.noOfFinishedPrints = totalFinished;
 			this.noOfCancelledPrints = totalCancelled;
-			this.finishedLastYear = finishedLastYearCount;
+ 
+ 			let maxCount = 0, busiestKey = '';
+ 			for (const k of keys) {
+ 				const c = (finishedMap[k] || 0) + (cancelledMap[k] || 0);
+ 				if (c > maxCount) { maxCount = c; busiestKey = k; }
+ 			}
+ 			this.busiestWeekCount = maxCount;
+ 			this.busiestWeek = groupByDay ? (busiestKey || '—') : (busiestKey ? this.weekLabelFromKey(busiestKey) : '—');
 
-			let maxCount = 0, busiestKey = '';
+			// longest run period: find period with highest total run minutes (sum of printMinutes per period)
+			let maxRun = 0, maxRunKey = '';
 			for (const k of keys) {
-				const c = (finishedMap[k] || 0) + (cancelledMap[k] || 0);
-				if (c > maxCount) { maxCount = c; busiestKey = k; }
+				const totalMin = (printTimePerPeriodMap[k] || 0);
+				if (totalMin > maxRun) { maxRun = totalMin; maxRunKey = k; }
 			}
-			this.busiestWeekCount = maxCount;
-			this.busiestWeek = groupByDay ? (busiestKey || '—') : (busiestKey ? this.weekLabelFromKey(busiestKey) : '—');
+			this.longestRunPeriodMinutes = Math.round(maxRun); // minutes
+			this.longestRunPeriodLabel = groupByDay ? (maxRunKey || '—') : (maxRunKey ? this.weekLabelFromKey(maxRunKey) : '—');
 
 			if (printTimes.length > 0) {
 				this.longestPrintTimeMinutes = Math.max(...printTimes);
@@ -409,6 +443,12 @@ export default {
 			// capture timeRange for use in callback (this context is lost in Chart.js callback)
 			const currentTimeRange = this.timeRange;
 
+			// formatting helper available inside Chart callbacks
+			const formatMinutes = (minutes) => {
+				// delegate to component formatter
+				try { return this.formatMinutesToHoursMinutes(minutes); } catch (e) { return String(minutes) + 'm'; }
+			};
+
  			const data = {
  				labels: this.weeklyLabels,
  				datasets: [
@@ -450,15 +490,13 @@ export default {
 						label: function(tooltipItem, data) {
 							const ds = data.datasets[tooltipItem.datasetIndex] || {};
 							const label = ds.label || '';
-							// detect total print time dataset by label
-							if (/total print time/i.test(label)) {
-								// tooltipItem.yLabel is in hours (may be fractional) — convert to minutes
+							// detect print-time dataset by label (case-insensitive match)
+							if (/print time/i.test(label)) {
+								// tooltipItem.yLabel is in hours (may be fractional) — convert to minutes and format
 								const minutes = Math.round((tooltipItem.yLabel || 0) * 60);
-								const h = Math.floor(minutes / 60);
-								const m = minutes % 60;
-								return label + ': ' + (h > 0 ? h + 'h ' : '') + m + 'm';
+								return label + ': ' + formatMinutes(minutes);
 							}
-							// default formatting for other datasets
+							// default formatting for other datasets — show raw value
 							return label + ': ' + tooltipItem.yLabel;
 						}
 					}
@@ -546,7 +584,7 @@ export default {
 	font-weight: 1000;
 	text-align: right;
 	vertical-align: bottom;
-	padding: 6px 8px;
+	padding: 6px 8px 6px 8px;
 	color: #DDD;
 	padding-top: 0%;
 	padding-bottom: 0%;
@@ -557,16 +595,14 @@ export default {
 .ps-label {
 	font-size: 0.85rem; /* smaller */
 	text-align: left;
-	vertical-align: bottom;
+	vertical-align: middle;
 	padding: 6px 4px;
 	color: #777;
-}
 
-.heading
-{
-	font-size: 1rem;
-	font-weight: 200;
-	color: #DDD;
+	/* limit label column width and allow wrapping to multiple lines */
+	max-width: 80px;
+	white-space: normal;
+	word-break: break-word;
 }
 
 /* ensure table cells don't wrap badly */
