@@ -1,9 +1,33 @@
 <template>
 	<v-card>
 		<v-card-title>
-			<div>Print Statistics</div> <v-btn  @click="loadStats">Load Stats</v-btn>
-			</v-card-title>
-		<v-simple-table>
+			<div style="display:flex;width:100%;align-items:center;">
+				<!-- left: heading -->
+				<div style="flex:1">
+					<div class="heading">Print Statistics</div>
+				</div>
+				<!-- right: controls -->
+				<div style="display:flex;align-items:center;gap:12px;">
+					<v-select
+						v-model="selectedFile"
+						:items="files"
+						label="Select log file"
+						style="max-width:300px;"
+						dense
+						hide-details
+					/>
+					<v-btn color="success" @click="loadStats">
+						<v-icon left>mdi-play</v-icon>
+						Load Stats
+					</v-btn>
+				</div>
+			</div>
+		</v-card-title>
+		<!-- overlay bound to loading -->
+		<v-overlay :value="loading" absolute>
+			<v-progress-circular indeterminate size="48" color="white"></v-progress-circular>
+		</v-overlay>
+ 		<v-simple-table>
 			<template #default>
 				<tr>
 					<td colspan="1" rowspan="3">
@@ -13,21 +37,21 @@
 						</div>
 					</td>
 					<td class="ps-value">{{ noOfFinishedPrints }}</td>
-					<td class="ps-label">No. finished prints</td>
+					<td class="ps-label">Finished prints, in total</td>
 					<td class="ps-value">{{ noOfCancelledPrints }}</td>
-					<td class="ps-label">No. cancelled prints</td>
+					<td class="ps-label">Cancelled prints</td>
 				</tr>
 				<tr>
 					<td class="ps-value">{{ finishedLastYear }}</td>
 					<td class="ps-label">Finished (last rolling year)</td>
-					<td class="ps-value">{{ busiestWeek }} </td>
-					<td class="ps-label">Busiest week, ({{ busiestWeekCount }} prints)</td>
+					<td class="ps-value">{{ busiestWeekCount }} </td>
+					<td class="ps-label">Busiest week, ({{ busiestWeek }} )</td>
 				</tr>
 				<tr>
 					<td class="ps-value">{{ avgPrintTimeFormatted }}</td>
-					<td class="ps-label">Average print time</td>
+					<td class="ps-label">Average print</td>
 					<td class="ps-value">{{ longestPrintTimeFormatted }}</td>
-					<td class="ps-label">Longest print time</td>
+					<td class="ps-label">Longest print</td>
 				</tr>
 				<tr>
  				<td colspan="6">
@@ -120,6 +144,21 @@ export default {
 			const monday = new Date(simple);
 			monday.setUTCDate(simple.getUTCDate() - (day - 1));
 			return monday.toISOString().slice(0,10);
+		},
+		async fetchFileList() {
+			this.loading = true;
+			try {
+				console.log("systemDirectory");
+				console.log(this.systemDirectory);
+
+				const files = await this.getFileList(this.systemDirectory);
+				this.files = files
+					.filter(file => !file.isDirectory && (file.name.endsWith('.txt') || file.name.endsWith('.log')))
+					.map(file => file.name)
+					.sort();
+			} finally {
+				this.loading = false;
+			}
 		},
  		async loadStats() {
  			if (this.loading) {
@@ -433,6 +472,9 @@ export default {
  			}
  		}
  	},
+ 	mounted() {
+ 		this.fetchFileList();
+ 	},
  	beforeDestroy() {
  		if (this.chartInstance) {
  			this.chartInstance.destroy();
@@ -457,6 +499,7 @@ export default {
 	color: #DDD;
 	padding-top: 0%;
 	padding-bottom: 0%;
+	padding-right: 4px;
 }
 
 /* labels: smaller, left-aligned, bottom-aligned */
@@ -464,8 +507,15 @@ export default {
 	font-size: 0.85rem; /* smaller */
 	text-align: left;
 	vertical-align: bottom;
-	padding: 6px 8px;
+	padding: 6px 4px;
 	color: #777;
+}
+
+.heading
+{
+	font-size: 1rem;
+	font-weight: 200;
+	color: #DDD;
 }
 
 /* ensure table cells don't wrap badly */
