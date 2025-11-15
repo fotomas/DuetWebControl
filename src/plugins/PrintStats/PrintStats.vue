@@ -1,44 +1,45 @@
 <template>
-	<v-simple-table>
-		<template #default>
-			<v-btn  @click="loadStats">Load Stats</v-btn>
-			<!-- show parsed results -->
-			<tr>
-				<td>{{ noOfFinishedPrints }}</td>
-				<td>No. finished prints (warn)</td>
-				<td>{{ noOfCancelledPrints }}</td>
-				<td>No. cancelled prints (warn)</td>
-			</tr>
-			<tr>
-				<td>Finished (last rolling year)</td>
-				<td>{{ finishedLastYear }}</td>
-				<td>Busiest week</td>
-				<td>{{ busiestWeek }} ({{ busiestWeekCount }} total)</td>
-			</tr>
-			<tr>
-				<td>Average print time (finished)</td>
-				<td>{{ avgPrintTimeFormatted }}</td>
-				<td>Longest print time</td>
-				<td>{{ longestPrintTimeFormatted }}</td>
-			</tr>
-			<tr>
-				<td colspan="2">
+	<v-card>
+		<v-card-title>
+			<div>Print Statistics</div> <v-btn  @click="loadStats">Load Stats</v-btn>
+			</v-card-title>
+		<v-simple-table>
+			<template #default>
+				<tr>
+					<td colspan="1" rowspan="3">
 					<!-- Pie chart: finished vs cancelled ratio -->
-					<div style="width:100%;overflow:hidden;max-width:300px;">
-						<canvas ref="ratioChart" style="display:block;width:100%;height:200px;max-width:100%;box-sizing:border-box"></canvas>
-					</div>
-				</td>
-			</tr>
- 			<tr>
- 				<td colspan="2">
+						<div style="width:100%;overflow:hidden;max-width:300px;">
+							<canvas ref="ratioChart" style="display:block;width:100%;height:200px;max-width:100%;box-sizing:border-box"></canvas>
+						</div>
+					</td>
+					<td class="ps-value">{{ noOfFinishedPrints }}</td>
+					<td class="ps-label">No. finished prints</td>
+					<td class="ps-value">{{ noOfCancelledPrints }}</td>
+					<td class="ps-label">No. cancelled prints</td>
+				</tr>
+				<tr>
+					<td class="ps-value">{{ finishedLastYear }}</td>
+					<td class="ps-label">Finished (last rolling year)</td>
+					<td class="ps-value">{{ busiestWeek }} </td>
+					<td class="ps-label">Busiest week, ({{ busiestWeekCount }} prints)</td>
+				</tr>
+				<tr>
+					<td class="ps-value">{{ avgPrintTimeFormatted }}</td>
+					<td class="ps-label">Average print time</td>
+					<td class="ps-value">{{ longestPrintTimeFormatted }}</td>
+					<td class="ps-label">Longest print time</td>
+				</tr>
+				<tr>
+ 				<td colspan="6">
  					<!-- ensure the canvas never grows larger than its container -->
  					<div style="width:100%;overflow:hidden;">
- 						<canvas ref="weekChart" style="display:block;width:100%;height:240px;max-width:100%;box-sizing:border-box"></canvas>
+ 						<canvas ref="weekChart" style="display:block;width:100%;height:300px;max-width:100%;box-sizing:border-box"></canvas>
  					</div>
  				</td>
  			</tr>
- 		</template>
- 	</v-simple-table>
+			</template>
+		</v-simple-table>
+	</v-card>
 </template>
 
 <script>
@@ -301,8 +302,8 @@ export default {
 			const options = {
 				responsive: true,
 				maintainAspectRatio: false,
-				legend: { display: true, position: 'bottom' },
-				cutoutPercentage: 50,
+				legend: { display: true, position: 'top' },
+				//cutoutPercentage: 30,
 			};
 
 			if (this.ratioChartInstance) {
@@ -312,7 +313,7 @@ export default {
 				if (typeof this.ratioChartInstance.resize === 'function') this.ratioChartInstance.resize();
 			} else {
 				this.ratioChartInstance = new Chart(ctx, {
-					type: 'doughnut',
+					type: 'pie',
 					data,
 					options
 				});
@@ -444,3 +445,31 @@ export default {
  	},
  }
 </script>
+
+<style scoped>
+/* values: large, bold, right-aligned, bottom-aligned */
+.ps-value {
+	font-size: 3.0rem;
+	font-weight: 1000;
+	text-align: right;
+	vertical-align: bottom;
+	padding: 6px 8px;
+	color: #DDD;
+	padding-top: 0%;
+	padding-bottom: 0%;
+}
+
+/* labels: smaller, left-aligned, bottom-aligned */
+.ps-label {
+	font-size: 0.85rem; /* smaller */
+	text-align: left;
+	vertical-align: bottom;
+	padding: 6px 8px;
+	color: #777;
+}
+
+/* ensure table cells don't wrap badly */
+.v-simple-table td {
+	white-space: nowrap;
+}
+</style>
